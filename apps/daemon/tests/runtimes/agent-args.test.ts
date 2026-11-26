@@ -5,13 +5,19 @@ import {
 } from './helpers/test-helpers.js';
 import {
   parseAntigravityModelsOutput,
+  resolveAntigravityModelSlug,
+  resolveAntigravitySettingsLabel,
   writeAntigravityModelSelection,
 } from '../../src/runtimes/defs/antigravity.js';
 import { parseOpenCodeModels } from '../../src/runtimes/defs/opencode.js';
 import { agentCapabilities } from '../../src/runtimes/capabilities.js';
 import {
   getRememberedLiveModels,
+  isKnownModel,
+  normalizeModelIdForDef,
   rememberLiveModels,
+  resetLiveModelsForTests,
+  sanitizeCustomModel,
 } from '../../src/runtimes/models.js';
 import type { TestAgentDef } from './helpers/test-helpers.js';
 
@@ -723,31 +729,17 @@ test('antigravity runs headless stream-json with the prompt as one agy user mess
   // The prompt never rides argv, so no argv budget applies.
   assert.equal(antigravity.maxPromptArgBytes, undefined);
 
-  // Picker exposes the synthetic Default + the 8 labels agy's TUI
-  // Switch-Model surfaces for consumer-tier accounts. The set is small
-  // enough to ship statically; revisit when upstream adds an `agy
-  // models` subcommand (also tracked under issue #35).
-  assert.deepEqual(
-    antigravity.fallbackModels.map((m) => m.id),
-    [
-      'default',
-      'Gemini 3.1 Pro (High)',
-      'Gemini 3.1 Pro (Low)',
-      'Gemini 3.5 Flash (High)',
-      'Gemini 3.5 Flash (Medium)',
-      'Gemini 3.5 Flash (Low)',
-      'Claude Sonnet 4.6 (Thinking)',
-      'Claude Opus 4.6 (Thinking)',
-      'GPT-OSS 120B (Medium)',
-    ],
-  );
+  assert.deepEqual(antigravity.listModels?.args, ['models']);
+  assert.ok(antigravity.fallbackModels.some((m) => m.id === 'default'));
+  assert.ok(antigravity.fallbackModels.some((m) => m.id === 'gemini-4-neon-high'));
+  assert.ok(antigravity.fallbackModels.some((m) => m.id === 'claude-opus-5-5-high'));
+  assert.ok(antigravity.fallbackModels.some((m) => m.id === 'claude-sonnet-5-5-high'));
+  assert.equal(antigravity.supportsCustomModel, undefined);
 
-  // `agy` v1.0.3 has no `--model` flag (upstream #35), no `models`
-  // subcommand, and no `/model` slash command — a user-typed model id
-  // would be silently ignored at spawn, looking like an OD bug. The
-  // settings UI hides the "Custom (fill below)" option when this is
-  // `false`. Remove this opt-out once upstream wires #35.
-  assert.equal(antigravity.supportsCustomModel, false);
+  assert.ok(claude.fallbackModels.some((m) => m.id === 'claude-opus-5-5'));
+  assert.ok(claude.fallbackModels.some((m) => m.id === 'claude-sonnet-5-5'));
+  assert.ok(claude.fallbackModels.some((m) => m.id === 'claude-haiku-5-5'));
+  assert.ok(claude.fallbackModels.some((m) => m.id === 'claude-fable-5-2'));
 });
 
 // OPEND-3495: on Windows the composed OD prompt (system prompt + skills +
@@ -786,6 +778,8 @@ test('antigravity gates non-interactive permission bypass on the detected CLI ca
   assert.deepEqual(antigravity.capabilityFlags, {
     '--dangerously-skip-permissions': 'skipPermissions',
     '--model': 'modelFlag',
+    '--effort': 'effortFlag',
+    '--disable-slash-commands': 'disableSlashCommands',
   });
   assert.deepEqual(antigravity.buildArgs('', [], [], {}), AGY_STREAM_JSON_ARGS);
 
@@ -800,46 +794,84 @@ test('antigravity gates non-interactive permission bypass on the detected CLI ca
   }
 });
 
-test('antigravity parses live `agy models` output and passes --model when supported', () => {
+test('antigravity parses live `agy models` output with spinner/ANSI stripping and passes --model slug without mutating settings.json', () => {
   const parsed = parseAntigravityModelsOutput(
     [
-      'Fetching available models...',
-      'gemini-4-neon-high\tGemini 4 Neon (High)',
+      '\r\x1b[36m⠋\x1b[0m Fetching available models...\rgemini-4-neon-high\tGemini 4 Neon (High)',
       'claude-opus-5-5-medium\tClaude Opus 5.5 (Medium)',
       'gpt-oss-120b-medium\tGPT-OSS 120B (Medium)',
     ].join('\n'),
   );
   assert.deepEqual(parsed, [
     { id: 'default', label: 'Default (CLI config)' },
-    { id: 'Gemini 4 Neon (High)', label: 'Gemini 4 Neon (High)' },
-    { id: 'Claude Opus 5.5 (Medium)', label: 'Claude Opus 5.5 (Medium)' },
-    { id: 'GPT-OSS 120B (Medium)', label: 'GPT-OSS 120B (Medium)' },
+    { id: 'gemini-4-neon-high', label: 'Gemini 4 Neon (High)' },
+    { id: 'claude-opus-5-5-medium', label: 'Claude Opus 5.5 (Medium)' },
+    { id: 'gpt-oss-120b-medium', label: 'GPT-OSS 120B (Medium)' },
   ]);
   assert.equal(parseAntigravityModelsOutput('Fetching available models...\n'), null);
 
+  resetLiveModelsForTests();
   const settingsDir = mkdtempSync(join(tmpdir(), 'od-agy-model-flag-'));
-  agentCapabilities.set('antigravity', { modelFlag: true, skipPermissions: true });
+  const settingsPath = join(settingsDir, 'settings.json');
+  agentCapabilities.set('antigravity', {
+    modelFlag: true,
+    skipPermissions: true,
+    effortFlag: true,
+    disableSlashCommands: true,
+  });
   try {
     const args = antigravity.buildArgs(
       'hi',
       [],
       [],
-      { model: 'Gemini 4 Neon (High)' },
+      { model: 'Gemini 4 Neon (High)', reasoning: 'low' },
       {
         agentLogFilePath: '/tmp/od-agy-test.log',
-        antigravitySettingsPath: join(settingsDir, 'settings.json'),
+        antigravitySettingsPath: settingsPath,
       },
     );
     assert.deepEqual(args, [
       '--log-file',
       '/tmp/od-agy-test.log',
       '--model',
-      'Gemini 4 Neon (High)',
+      'gemini-4-neon-high',
       '--dangerously-skip-permissions',
+      '--disable-slash-commands',
       ...AGY_STREAM_JSON_ARGS,
     ]);
+    assert.equal(existsSync(settingsPath), false);
+    assert.equal(resolveAntigravitySettingsLabel('gemini-4-neon-high'), null);
+
+    const defaultEffortArgs = antigravity.buildArgs(
+      'hi',
+      [],
+      [],
+      { reasoning: 'low' },
+      { agentLogFilePath: '/tmp/od-agy-test.log' },
+    );
+    assert.deepEqual(defaultEffortArgs, [
+      '--log-file',
+      '/tmp/od-agy-test.log',
+      '--dangerously-skip-permissions',
+      '--effort',
+      'low',
+      '--disable-slash-commands',
+      ...AGY_STREAM_JSON_ARGS,
+    ]);
+
+    assert.equal(
+      normalizeModelIdForDef(antigravity, 'Gemini 3.1 Pro (High)'),
+      'gemini-3.1-pro-high',
+    );
+    assert.equal(
+      sanitizeCustomModel(normalizeModelIdForDef(antigravity, 'Gemini 3.1 Pro (High)')),
+      'gemini-3.1-pro-high',
+    );
+    assert.equal(isKnownModel(antigravity, 'Gemini 4 Neon (High)'), true);
+    assert.equal(resolveAntigravityModelSlug('gemini-4-carbon-low'), 'gemini-4-carbon-low');
   } finally {
     agentCapabilities.delete('antigravity');
+    resetLiveModelsForTests();
     rmSync(settingsDir, { recursive: true, force: true });
   }
 });

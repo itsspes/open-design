@@ -1067,10 +1067,62 @@ test('detectAgents records Antigravity permission capability from stderr help ou
       assert.deepEqual(agentCapabilities.get('antigravity'), {
         skipPermissions: true,
         modelFlag: false,
+        effortFlag: false,
+        disableSlashCommands: false,
       });
       assert.ok(
         antigravity.buildArgs('', [], [], {}).includes('--dangerously-skip-permissions'),
       );
+    });
+  } finally {
+    agentCapabilities.delete('antigravity');
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('detectAgents marks Antigravity auth ok on live models and missing on sign-in prompt', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'od-antigravity-auth-models-'));
+  try {
+    await withEnvSnapshot(['PATH', 'OD_AGENT_HOME'], async () => {
+      const bin = join(dir, 'agy');
+      writeFileSync(
+        bin,
+        '#!/bin/sh\n' +
+          'if [ "$1" = "--version" ]; then echo "1.5.18"; exit 0; fi\n' +
+          'if [ "$1" = "--help" ]; then echo "--dangerously-skip-permissions --model --effort --disable-slash-commands" >&2; exit 0; fi\n' +
+          'if [ "$1" = "models" ]; then printf "\\r⠋ Fetching available models...\\rgemini-4-neon-high\\tGemini 4 Neon (High)\\n"; exit 0; fi\n' +
+          'exit 0\n',
+      );
+      chmodSync(bin, 0o755);
+      process.env.PATH = dir;
+      process.env.OD_AGENT_HOME = dir;
+      agentCapabilities.delete('antigravity');
+
+      const agentsOk = await detectAgents();
+      const detectedOk = agentsOk.find((agent) => agent.id === 'antigravity');
+      assert.equal(detectedOk?.available, true);
+      assert.equal(detectedOk?.modelsSource, 'live');
+      assert.equal(detectedOk?.authStatus, 'ok');
+      assert.deepEqual(
+        detectedOk?.models.map((m) => m.id),
+        ['default', 'gemini-4-neon-high'],
+      );
+
+      writeFileSync(
+        bin,
+        '#!/bin/sh\n' +
+          'if [ "$1" = "--version" ]; then echo "1.5.18"; exit 0; fi\n' +
+          'if [ "$1" = "--help" ]; then echo "--dangerously-skip-permissions --model" >&2; exit 0; fi\n' +
+          'if [ "$1" = "models" ]; then echo "Error: Please sign in to view available models. Launch the CLI without arguments to sign in." >&2; exit 1; fi\n' +
+          'exit 0\n',
+      );
+      chmodSync(bin, 0o755);
+
+      const agentsMissing = await detectAgents();
+      const detectedMissing = agentsMissing.find((agent) => agent.id === 'antigravity');
+      assert.equal(detectedMissing?.available, true);
+      assert.equal(detectedMissing?.modelsSource, 'fallback');
+      assert.equal(detectedMissing?.authStatus, 'missing');
     });
   } finally {
     agentCapabilities.delete('antigravity');

@@ -254,6 +254,7 @@ import {
 import {
   findKnownModel,
   getRememberedLiveModels,
+  normalizeModelIdForDef,
   resolveDefaultModelFromOptions,
   resolveModelForAgent,
   resolveModelForServiceTier,
@@ -12710,13 +12711,17 @@ export async function startServer({
       typeof appConfigForRun?.agentModels?.[def.id]?.model === 'string'
         ? appConfigForRun.agentModels[def.id].model
         : null;
+    const normalizedRequestedModel = normalizeModelIdForDef(
+      def,
+      requestedRuntimeModel,
+    );
     let safeModel = resolveModelForAgent(
       def,
-      typeof requestedRuntimeModel === 'string'
-        ? isKnownModel(def, requestedRuntimeModel, requestedLiveModelScope)
-          ? requestedRuntimeModel
-          : sanitizeCustomModel(requestedRuntimeModel)
-        : configuredModel,
+      normalizedRequestedModel
+        ? isKnownModel(def, normalizedRequestedModel, requestedLiveModelScope)
+          ? normalizedRequestedModel
+          : sanitizeCustomModel(normalizedRequestedModel)
+        : normalizeModelIdForDef(def, configuredModel),
       process.env,
       requestedLiveModelScope,
     );
@@ -14536,15 +14541,18 @@ export async function startServer({
     // buildArgs (which performs the write) and released asynchronously
     // AFTER agy's --log-file confirms the model was propagated. See
     // `antigravity.ts` for the chain implementation.
+    await ensureDetectedRuntimeCapabilities(def.id, configuredAgentEnv);
     let antigravityModelLockRelease: (() => void) | null = null;
-    const antigravityConcreteModel =
-      def.id === 'antigravity'
-      && typeof agentOptions.model === 'string'
-      && agentOptions.model.length > 0
-      && agentOptions.model !== 'default'
-        ? agentOptions.model
-        : null;
-    if (antigravityConcreteModel) {
+    let antigravitySettingsLabel: string | null = null;
+    if (def.id === 'antigravity') {
+      const { resolveAntigravitySettingsLabel } = await import(
+        './runtimes/defs/antigravity.js'
+      );
+      antigravitySettingsLabel = resolveAntigravitySettingsLabel(
+        agentOptions.model,
+      );
+    }
+    if (antigravitySettingsLabel) {
       const { acquireAntigravityModelLock } = await import(
         './runtimes/defs/antigravity.js'
       );
@@ -14555,10 +14563,6 @@ export async function startServer({
     const observeClaudeNativeChildBehavior =
       def.id === 'claude' && strategyTaskAtStart !== null;
     try {
-      // Optional argv flags are gated on the `--help` capability map, which used
-      // to be filled only by `GET /api/agents`. Probe it here so a daemon that
-      // has never served that route still builds the same argv as one that has.
-      await ensureDetectedRuntimeCapabilities(def.id, configuredAgentEnv);
       args = def.buildArgs(
         composed,
         promptImagePaths,
@@ -14581,6 +14585,7 @@ export async function startServer({
         },
       );
     } catch (err) {
+      antigravityModelLockRelease?.();
       cleanupPromptFile();
       throw err;
     }
@@ -15429,7 +15434,7 @@ export async function startServer({
       // queue can never starve permanently.
       if (
         antigravityModelLockRelease
-        && antigravityConcreteModel
+        && antigravitySettingsLabel
         && agentLogFilePath
       ) {
         const releaseOnce = (() => {
@@ -15446,7 +15451,7 @@ export async function startServer({
         );
         void waitForAgyToReadModel(
           agentLogFilePath,
-          antigravityConcreteModel,
+          antigravitySettingsLabel,
           { abortSignal: watcherAbort.signal },
         )
           .then((found) => {

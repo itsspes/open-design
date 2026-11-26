@@ -52,7 +52,7 @@ const ANTIGRAVITY_AUTH_GUIDANCE =
 // the picker from OD until upstream issue #35 ships a `--model`
 // flag — see antigravity.ts notes.
 const ANTIGRAVITY_QUOTA_GUIDANCE =
-  'Antigravity returned "RESOURCE_EXHAUSTED: Individual quota reached" for the current model. Each Antigravity model (Gemini 3 Pro / Flash, Claude 4.6, GPT-OSS) has its own quota.\n\nFix: open `agy` in a terminal and use its Switch Model picker (the menu at the bottom of the TUI) to pick a model with available quota, then retry here. OpenDesign uses whatever model you pick in agy\'s TUI when the Settings model picker is left on "Default". Quotas reset automatically on Antigravity\'s schedule.';
+  'Antigravity returned "RESOURCE_EXHAUSTED: Individual quota reached" for the current model. Each Antigravity model has its own quota.\n\nFix: pick a model with available quota in OpenDesign Settings, or open `agy` in a terminal and use its Switch Model picker (the menu at the bottom of the TUI), then retry here. OpenDesign uses whatever model you pick in agy\'s TUI when the Settings model picker is left on "Default". Quotas reset automatically on Antigravity\'s schedule.';
 
 const REASONIX_AUTH_GUIDANCE =
   'DeepSeek Reasonix is installed but is not authenticated. Add your API key in `~/.reasonix/config.json` under `apiKey`, or expose DEEPSEEK_API_KEY to the OpenDesign daemon process, then retry. If OpenDesign is launched outside an interactive shell, shell rc files such as ~/.zshrc may not be loaded.';
@@ -122,6 +122,7 @@ export function isAntigravityAuthFailureText(text: string): boolean {
     /authentication timed out/i.test(value) ||
     /authentication failed or timed out/i.test(value) ||
     /authentication required\. run 'agy' to log in/i.test(value) ||
+    /please sign in to view available models/i.test(value) ||
     /not logged into antigravity/i.test(value) ||
     /accounts\.google\.com\/o\/oauth2\/auth.*antigravity/i.test(value)
   );

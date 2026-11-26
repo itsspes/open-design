@@ -63,6 +63,8 @@ import {
 import { aihubmixHeaders } from './integrations/aihubmix.js';
 import type { AgentCliEnvPrefs } from './app-config.js';
 import type { RuntimeAgentDef } from './runtimes/types.js';
+import { agentCapabilities } from './runtimes/capabilities.js';
+import { ensureDetectedRuntimeCapabilities } from './runtimes/detection.js';
 import { preparePromptFileForAgent, type PreparedPromptFile } from './runtimes/prompt-file.js';
 import { configuredAllowedInternalHosts } from './origin-validation.js';
 import {
@@ -2581,6 +2583,9 @@ async function testAgentConnectionInternal(
     }
     let args: string[];
     try {
+      if (input.agentId === 'antigravity') {
+        await ensureDetectedRuntimeCapabilities('antigravity', configuredAgentEnv);
+      }
       promptFile = await preparePromptFileForAgent(def, SMOKE_PROMPT, 'connection-test');
       args = def.buildArgs(
         SMOKE_PROMPT,
@@ -2615,6 +2620,12 @@ async function testAgentConnectionInternal(
       }
       if ((input.agentId === 'opencode' || input.agentId === 'mimo') && !args.includes('--title')) {
         args.push('--title', 'Connection test');
+      }
+      if (input.agentId === 'antigravity') {
+        const caps = agentCapabilities.get('antigravity');
+        if (caps?.effortFlag && !args.includes('--effort') && !args.includes('--model')) {
+          args.push('--effort', 'low');
+        }
       }
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err);

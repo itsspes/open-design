@@ -244,6 +244,10 @@ export type RuntimeAgentDef = {
   // `session/set_model` and rejects free-form ids). Defaults to allowing
   // custom input (undefined === true) so most adapters keep today's UX.
   supportsCustomModel?: boolean;
+  // Map a persisted or requested model id to this adapter's current
+  // canonical id (e.g. a legacy display label to its slug) before shared
+  // known-model / custom-model validation runs.
+  normalizeModelId?: (modelId: string) => string;
   // When `true`, the daemon trusts this adapter's CLI to carry its own
   // multi-turn conversation memory across spawn invocations (today only
   // `agy -c`). The chat composer skips the rendered web transcript on

@@ -9,7 +9,11 @@ import {
 } from './models.js';
 import { applyAgentLaunchEnv, resolveAgentLaunch } from './launch.js';
 import { spawnEnvForAgent } from './env.js';
-import { probeAgentAuthStatus } from './auth.js';
+import {
+  classifyAgentAuthFailure,
+  probeAgentAuthStatus,
+  type AgentAuthProbeResult,
+} from './auth.js';
 import { agentCapabilities } from './capabilities.js';
 import { installMetaForAgent } from './metadata.js';
 import {
@@ -39,6 +43,7 @@ import type {
 type FetchedRuntimeModels = {
   models: RuntimeModelOption[];
   source: RuntimeModelSource;
+  inferredAuth?: AgentAuthProbeResult | null;
 };
 
 export interface DetectedRuntimeVersions {
@@ -224,7 +229,7 @@ async function fetchModels(
     return { models: def.fallbackModels, source: 'fallback' };
   }
   try {
-    const { stdout } = await execAgentFile(resolvedBin, def.listModels.args, {
+    const { stdout, stderr } = await execAgentFile(resolvedBin, def.listModels.args, {
       env,
       timeout: def.listModels.timeoutMs ?? 5000,
       // Models lists from popular CLIs (e.g. opencode) easily exceed the
@@ -232,16 +237,41 @@ async function fetchModels(
       // it so we don't truncate the listing.
       maxBuffer: 8 * 1024 * 1024,
     });
-    const parsed = def.listModels.parse(String(stdout));
+    const stdoutText = String(stdout ?? '');
+    const stderrText = String(stderr ?? '');
+    const parsed = def.listModels.parse(stdoutText);
     // Empty / null parse result means the CLI didn't actually return a
     // usable list (e.g. cursor-agent's "No models available"); fall back
     // to the static hint so the picker isn't stuck on Default-only.
     if (!parsed || parsed.length === 0) {
-      return { models: def.fallbackModels, source: 'fallback' };
+      const authFailure = classifyAgentAuthFailure(
+        def.id,
+        `${stdoutText}\n${stderrText}`,
+      );
+      return {
+        models: def.fallbackModels,
+        source: 'fallback',
+        ...(authFailure ? { inferredAuth: authFailure } : {}),
+      };
     }
-    return { models: mergeFallbackModelMetadata(def, parsed), source: 'live' };
-  } catch {
-    return { models: def.fallbackModels, source: 'fallback' };
+    return {
+      models: mergeFallbackModelMetadata(def, parsed),
+      source: 'live',
+      ...(def.id === 'antigravity' ? { inferredAuth: { status: 'ok' } } : {}),
+    };
+  } catch (error) {
+    const err = error as { message?: string; stdout?: unknown; stderr?: unknown };
+    const output = [
+      typeof err?.message === 'string' ? err.message : '',
+      typeof err?.stdout === 'string' ? err.stdout : '',
+      typeof err?.stderr === 'string' ? err.stderr : '',
+    ].join('\n');
+    const authFailure = classifyAgentAuthFailure(def.id, output);
+    return {
+      models: def.fallbackModels,
+      source: 'fallback',
+      ...(authFailure ? { inferredAuth: authFailure } : {}),
+    };
   }
 }
 
@@ -738,7 +768,10 @@ async function probe(
   if (caps) {
     agentCapabilities.set(def.id, caps);
   }
-  const authDiagnostic = auth ? buildAuthDiagnostic(def, auth) : null;
+  const resolvedAuth = auth ?? modelResult.inferredAuth ?? null;
+  const authDiagnostic = resolvedAuth
+    ? buildAuthDiagnostic(def, resolvedAuth)
+    : null;
   const runtimeVersions: DetectedRuntimeVersions = {
     invocable: true,
     ...(outcome.version ? { agentCliVersion: outcome.version } : {}),
@@ -771,10 +804,10 @@ async function probe(
     available: true,
     path: launch.selectedPath,
     version: outcome.version,
-    ...(auth
+    ...(resolvedAuth
       ? {
-          authStatus: auth.status,
-          ...(auth.message ? { authMessage: auth.message } : {}),
+          authStatus: resolvedAuth.status,
+          ...(resolvedAuth.message ? { authMessage: resolvedAuth.message } : {}),
         }
       : {}),
     ...(versionDiagnostic || authDiagnostic

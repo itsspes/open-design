@@ -34,7 +34,11 @@ import {
 import { isSafeId as isSafeProjectId } from '../projects.js';
 import { projectKindToTracking } from '@open-design/contracts/analytics';
 import { proxyDispatcherRequestInit, validateUserProviderBaseUrl } from '../connectionTest.js';
-import { isKnownReasoningEffort, resolveModelForServiceTier } from '../runtimes/models.js';
+import {
+  isKnownReasoningEffort,
+  normalizeModelIdForDef,
+  resolveModelForServiceTier,
+} from '../runtimes/models.js';
 import { googleStreamGenerateContentUrl } from '../integrations/google-models.js';
 import { createRoleMarkerGuard } from '../role-marker-guard.js';
 import { authorizeReasoningEgress, sendReasoningEgressDenial } from '../reasoning-egress.js';
@@ -354,8 +358,11 @@ export function registerChatRoutes(app: Express, ctx: RegisterChatRoutesDeps) {
             def && typeof appConfig.agentModels?.[def.id]?.model === 'string'
               ? appConfig.agentModels[def.id].model
               : undefined;
-          const requestedModel =
+          const rawRequestedModel =
             typeof body.model === 'string' ? body.model : configuredModel;
+          const requestedModel = def
+            ? normalizeModelIdForDef(def, rawRequestedModel) ?? undefined
+            : rawRequestedModel;
           let safeModel =
             def && typeof requestedModel === 'string'
               ? isKnownModel(def, requestedModel)
