@@ -257,7 +257,9 @@ async function fetchModels(
     return {
       models: mergeFallbackModelMetadata(def, parsed),
       source: 'live',
-      ...(def.id === 'antigravity' ? { inferredAuth: { status: 'ok' } } : {}),
+      ...(def.listModels.infersAuthStatus
+        ? { inferredAuth: { status: 'ok' } }
+        : {}),
     };
   } catch (error) {
     const err = error as { message?: string; stdout?: unknown; stderr?: unknown };

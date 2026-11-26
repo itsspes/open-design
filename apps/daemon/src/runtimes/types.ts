@@ -101,6 +101,9 @@ export type RuntimeListModels = {
   args: string[];
   timeoutMs?: number;
   parse: (stdout: string) => RuntimeModelOption[] | null;
+  // When true, a live model listing implies the CLI is authenticated
+  // (authStatus: 'ok') without spawning a separate authProbe subprocess.
+  infersAuthStatus?: boolean;
 };
 
 export type RuntimeVersionPolicy = {

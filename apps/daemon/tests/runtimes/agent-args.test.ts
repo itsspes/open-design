@@ -5,6 +5,7 @@ import {
 } from './helpers/test-helpers.js';
 import {
   parseAntigravityModelsOutput,
+  resolveAntigravityModelPlan,
   resolveAntigravityModelSlug,
   resolveAntigravitySettingsLabel,
   writeAntigravityModelSelection,
@@ -730,6 +731,7 @@ test('antigravity runs headless stream-json with the prompt as one agy user mess
   assert.equal(antigravity.maxPromptArgBytes, undefined);
 
   assert.deepEqual(antigravity.listModels?.args, ['models']);
+  assert.equal(antigravity.listModels?.infersAuthStatus, true);
   assert.ok(antigravity.fallbackModels.some((m) => m.id === 'default'));
   assert.ok(antigravity.fallbackModels.some((m) => m.id === 'gemini-4-neon-high'));
   assert.ok(antigravity.fallbackModels.some((m) => m.id === 'claude-opus-5-5-high'));
@@ -840,6 +842,17 @@ test('antigravity parses live `agy models` output with spinner/ANSI stripping an
       ...AGY_STREAM_JSON_ARGS,
     ]);
     assert.equal(existsSync(settingsPath), false);
+    assert.deepEqual(
+      resolveAntigravityModelPlan('Gemini 4 Neon (High)', { modelFlag: true }),
+      { mode: 'argv', slug: 'gemini-4-neon-high' },
+    );
+    assert.deepEqual(
+      resolveAntigravityModelPlan('gemini-4-neon-high', { modelFlag: false }),
+      { mode: 'settings', label: 'Gemini 4 Neon (High)' },
+    );
+    assert.deepEqual(resolveAntigravityModelPlan('default', { modelFlag: true }), {
+      mode: 'default',
+    });
     assert.equal(resolveAntigravitySettingsLabel('gemini-4-neon-high'), null);
 
     const defaultEffortArgs = antigravity.buildArgs(

@@ -2324,6 +2324,39 @@ async function resolveConnectionTestModelForAgent(
   }
 }
 
+function parseAntigravityResultFrame(stdout: string): {
+  status: string | null;
+  response: string | null;
+  error: string | null;
+} | null {
+  let parsed: {
+    status: string | null;
+    response: string | null;
+    error: string | null;
+  } | null = null;
+  for (const line of stdout.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      const obj = JSON.parse(trimmed) as Record<string, unknown>;
+      if (obj.event !== 'result') continue;
+      const res =
+        obj.result && typeof obj.result === 'object' && !Array.isArray(obj.result)
+          ? (obj.result as Record<string, unknown>)
+          : null;
+      if (!res) continue;
+      parsed = {
+        status: typeof res.status === 'string' ? res.status : null,
+        response: typeof res.response === 'string' ? res.response : null,
+        error: typeof res.error === 'string' ? res.error : null,
+      };
+    } catch {
+      // Ignore non-JSON lines.
+    }
+  }
+  return parsed;
+}
+
 async function testAgentConnectionInternal(
   input: AgentConnectionInput,
 ): Promise<ConnectionTestResponse> {
@@ -2731,6 +2764,30 @@ async function testAgentConnectionInternal(
       });
     });
 
+    let resolveAntigravityTerminalResult:
+      | ((res: { status: string | null; response: string | null; error: string | null }) => void)
+      | null = null;
+    const antigravityTerminalResult = new Promise<{
+      kind: 'antigravityResult';
+      status: string | null;
+      response: string | null;
+      error: string | null;
+    }>((resolve) => {
+      resolveAntigravityTerminalResult = (res) =>
+        resolve({ kind: 'antigravityResult', ...res });
+    });
+
+    if (def.id === 'antigravity') {
+      child.stdout?.on('data', (chunk: string) => {
+        const agyResult = parseAntigravityResultFrame(
+          sink.getRawStdout() + String(chunk),
+        );
+        if (agyResult?.status) {
+          resolveAntigravityTerminalResult?.(agyResult);
+        }
+      });
+    }
+
     const { acpSession } = attachAgentStreamHandlers(
       def,
       child,
@@ -3072,11 +3129,30 @@ async function testAgentConnectionInternal(
     ]);
 
     if (winner.kind === 'text') {
+      const parsedImmediate =
+        def.id === 'antigravity'
+          ? parseAntigravityResultFrame(sink.getRawStdout())
+          : null;
+      if (
+        parsedImmediate?.status === 'SUCCESS' &&
+        isSmokeOkReply(winner.text || parsedImmediate.response || sink.getText())
+      ) {
+        if (!childClosed && child) {
+          try {
+            child.kill();
+          } catch {}
+        }
+        return resultFromAgentText(
+          winner.text || parsedImmediate.response || sink.getText(),
+          { code: 0, signal: null },
+        );
+      }
       const completion = await Promise.race([
         streamError,
         childExit,
         cancellationPromise,
         providerConnectivity,
+        ...(def.id === 'antigravity' ? [antigravityTerminalResult] : []),
       ]);
       if (completion.kind === 'streamError') {
         return resultFromStreamError(completion.error);
@@ -3086,6 +3162,37 @@ async function testAgentConnectionInternal(
       }
       if (completion.kind === 'timeout' || completion.kind === 'aborted') {
         return resultFromCancellation(completion.kind);
+      }
+      if (completion.kind === 'antigravityResult') {
+        if (
+          completion.status === 'SUCCESS' &&
+          isSmokeOkReply(winner.text || completion.response || sink.getText())
+        ) {
+          if (!childClosed && child) {
+            try {
+              child.kill();
+            } catch {}
+          }
+          return resultFromAgentText(
+            winner.text || completion.response || sink.getText(),
+            { code: 0, signal: null },
+          );
+        }
+        const errorCompletion = await Promise.race([
+          streamError,
+          childExit,
+          cancellationPromise,
+        ]);
+        if (errorCompletion.kind === 'streamError') {
+          return resultFromStreamError(errorCompletion.error);
+        }
+        if (
+          errorCompletion.kind === 'timeout' ||
+          errorCompletion.kind === 'aborted'
+        ) {
+          return resultFromCancellation(errorCompletion.kind);
+        }
+        return await resultFromChildExit(errorCompletion);
       }
       return await resultFromChildExit(completion);
     }

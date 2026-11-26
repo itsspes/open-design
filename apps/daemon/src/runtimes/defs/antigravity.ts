@@ -29,8 +29,9 @@ export function encodeAntigravityStdinPrompt(prompt: string): string {
   return `${JSON.stringify({ event: 'user', message: { content: prompt } })}\n`;
 }
 
-// Fallback catalog for when `agy models` cannot run (signed out, offline, or
-// pre-`models` builds). Uses canonical slugs matching `agy 1.5.x` output.
+// Durable fallback catalog for when `agy models` cannot run (signed out,
+// offline, or pre-`models` builds). Transient/retiring models are left to
+// live `agy models` discovery.
 const ANTIGRAVITY_FALLBACK_MODELS: RuntimeModelOption[] = [
   DEFAULT_MODEL_OPTION,
   { id: 'gemini-4-neon-high', label: 'Gemini 4 Neon (High)' },
@@ -40,26 +41,18 @@ const ANTIGRAVITY_FALLBACK_MODELS: RuntimeModelOption[] = [
   { id: 'gemini-4-carbon-high', label: 'Gemini 4 Carbon (High)' },
   { id: 'gemini-4-carbon-medium', label: 'Gemini 4 Carbon (Medium)' },
   { id: 'gemini-4-carbon-low', label: 'Gemini 4 Carbon (Low)' },
-  { id: 'gemini-4-argon-high', label: 'Gemini 4 Argon (High)' },
-  { id: 'gemini-4-argon-medium', label: 'Gemini 4 Argon (Medium)' },
-  { id: 'gemini-4-argon-low', label: 'Gemini 4 Argon (Low)' },
   { id: 'gemini-4-hydrogen-high', label: 'Gemini 4 Hydrogen (High)' },
   { id: 'gemini-4-hydrogen-xhigh', label: 'Gemini 4 Hydrogen (XHigh)' },
   { id: 'gemini-4-hydrogen-medium', label: 'Gemini 4 Hydrogen (Medium)' },
   { id: 'gemini-4-hydrogen-low', label: 'Gemini 4 Hydrogen (Low)' },
   { id: 'gemini-pro-orchestrator-neon', label: 'Orchestrator (Neon)' },
   { id: 'gemini-pro-orchestrator', label: 'Orchestrator (Carbon)' },
-  { id: 'gemini-pro-orchestrator-argon', label: 'Orchestrator (Argon)' },
-  { id: 'gemini-3.8-flash-high', label: 'Gemini 3.8 Flash (High)' },
-  { id: 'gemini-3.8-flash-medium', label: 'Gemini 3.8 Flash (Medium)' },
-  { id: 'gemini-3.8-flash-low', label: 'Gemini 3.8 Flash (Low)' },
   { id: 'claude-opus-5-5-high', label: 'Claude Opus 5.5 (High)' },
   { id: 'claude-opus-5-5-medium', label: 'Claude Opus 5.5 (Medium)' },
   { id: 'claude-opus-5-5-low', label: 'Claude Opus 5.5 (Low)' },
   { id: 'claude-sonnet-5-5-high', label: 'Claude Sonnet 5.5 (High)' },
   { id: 'claude-sonnet-5-5-medium', label: 'Claude Sonnet 5.5 (Medium)' },
   { id: 'claude-sonnet-5-5-low', label: 'Claude Sonnet 5.5 (Low)' },
-  { id: 'gpt-oss-120b-medium', label: 'GPT-OSS 120B (Medium)' },
 ];
 
 // Display labels persisted by older OpenDesign versions mapped to their
@@ -145,16 +138,35 @@ export function resolveAntigravityModelSlug(
   return fallback?.id ?? null;
 }
 
+export type AntigravityModelPlan =
+  | { mode: 'default' }
+  | { mode: 'argv'; slug: string }
+  | { mode: 'settings'; label: string };
+
+// Single source of truth for how a model pick is delivered to `agy`:
+//   - 'default'  : leave agy's own TUI selection untouched
+//   - 'argv'     : pass `--model <slug>` (no shared settings.json write or lock)
+//   - 'settings' : write display label to settings.json (for pre-`--model` builds)
+export function resolveAntigravityModelPlan(
+  model: string | null | undefined,
+  caps: Record<string, boolean> | undefined = agentCapabilities.get('antigravity'),
+): AntigravityModelPlan {
+  if (typeof model !== 'string') return { mode: 'default' };
+  const trimmed = model.trim();
+  if (!trimmed || trimmed === DEFAULT_MODEL_OPTION.id) return { mode: 'default' };
+  const slug = resolveAntigravityModelSlug(trimmed);
+  if (slug && caps?.modelFlag) {
+    return { mode: 'argv', slug };
+  }
+  const label = slug ? antigravityLabelForSlug(slug) : trimmed;
+  return label ? { mode: 'settings', label } : { mode: 'default' };
+}
+
 export function resolveAntigravitySettingsLabel(
   model: string | null | undefined,
 ): string | null {
-  if (typeof model !== 'string') return null;
-  const trimmed = model.trim();
-  if (!trimmed || trimmed === DEFAULT_MODEL_OPTION.id) return null;
-  const slug = resolveAntigravityModelSlug(trimmed);
-  if (!slug) return trimmed;
-  if (agentCapabilities.get('antigravity')?.modelFlag) return null;
-  return antigravityLabelForSlug(slug);
+  const plan = resolveAntigravityModelPlan(model);
+  return plan.mode === 'settings' ? plan.label : null;
 }
 
 const ANTIGRAVITY_SETTINGS_PATH = join(
@@ -262,6 +274,7 @@ export const antigravityAgentDef = {
     args: ['models'],
     timeoutMs: 15_000,
     parse: parseAntigravityModelsOutput,
+    infersAuthStatus: true,
   },
   fallbackModels: ANTIGRAVITY_FALLBACK_MODELS,
   normalizeModelId: (modelId: string) =>
@@ -274,10 +287,10 @@ export const antigravityAgentDef = {
     runtimeContext = {},
   ) => {
     const caps = agentCapabilities.get('antigravity');
-    const settingsLabel = resolveAntigravitySettingsLabel(options.model);
-    if (settingsLabel) {
+    const modelPlan = resolveAntigravityModelPlan(options.model, caps);
+    if (modelPlan.mode === 'settings') {
       writeAntigravityModelSelection(
-        settingsLabel,
+        modelPlan.label,
         runtimeContext.antigravitySettingsPath,
       );
     }
@@ -285,16 +298,13 @@ export const antigravityAgentDef = {
     if (runtimeContext.agentLogFilePath) {
       args.push('--log-file', runtimeContext.agentLogFilePath);
     }
-    const modelSlug = settingsLabel
-      ? null
-      : resolveAntigravityModelSlug(options.model);
-    if (modelSlug && caps?.modelFlag) {
-      args.push(ANTIGRAVITY_MODEL_FLAG, modelSlug);
+    if (modelPlan.mode === 'argv') {
+      args.push(ANTIGRAVITY_MODEL_FLAG, modelPlan.slug);
     }
     if (caps?.skipPermissions) {
       args.push(ANTIGRAVITY_SKIP_PERMISSIONS_FLAG);
     }
-    if (caps?.effortFlag && options.reasoning && !modelSlug && !settingsLabel) {
+    if (caps?.effortFlag && options.reasoning && modelPlan.mode === 'default') {
       args.push(ANTIGRAVITY_EFFORT_FLAG, options.reasoning);
     }
     if (caps?.disableSlashCommands) {
